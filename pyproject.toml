@@ -3,7 +3,12 @@ name = "jatayu"
 version = "0.1.0"
 description = "Agentic vision-language assistant for remote-sensing imagery"
 requires-python = ">=3.11,<3.13"
-dependencies = ["pydantic>=2.8"]
+dependencies = [
+    "fastapi>=0.141.1",
+    "pydantic>=2.8",
+    "python-multipart>=0.0.32",
+    "uvicorn[standard]>=0.52.4",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.3", "ruff>=0.6"]
