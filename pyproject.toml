@@ -9,6 +9,7 @@ dependencies = [
     "python-multipart>=0.0.32",
     "uvicorn[standard]>=0.52.4",
     "streamlit>=1.62.0",
+    "rasterio>=1.4.4",
 ]
 
 [dependency-groups]
