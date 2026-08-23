@@ -19,7 +19,7 @@ def render_trace(trace_steps: list[dict]):
         with st.container(border=True):
             st.markdown(
                 f"<span class='stage-label' style='background:{color}'>"
-                f"{step['stage'].upper()}</span>&nbsp;&nbsp;**{i}. {step['label']}**",
+                f"{step['stage'].upper()}</span>&nbsp;&nbsp;**{i}. {step['detail']}**",
                 unsafe_allow_html=True,
             )
             st.caption(f"{step['duration_ms']} ms")
@@ -33,6 +33,8 @@ def render_trace(trace_steps: list[dict]):
 
 
 def render_legend(legend: dict[str, str]):
+    if not legend:
+        return
     st.subheader("Legend")
     cols = st.columns(len(legend))
     for col, (label, color) in zip(cols, legend.items()):
@@ -41,8 +43,6 @@ def render_legend(legend: dict[str, str]):
                 f"<span class='legend-swatch' style='background:{color}'></span>{label}",
                 unsafe_allow_html=True,
             )
-
-
 def render_issues(issues: list[dict]):
     for issue in issues:
         if issue["severity"] == "error":
