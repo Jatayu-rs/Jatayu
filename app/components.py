@@ -54,3 +54,37 @@ def render_issues(issues: list[dict]):
 def render_confidence_banner(confidence: float):
     if confidence < CONFIDENCE_THRESHOLD:
         st.warning("⚠️ The system is not confident in this answer. Treat it as a lead, not a fact.")
+
+
+def render_chat_sidebar():
+    st.sidebar.markdown("### Chats")
+    if st.sidebar.button("+ New chat", use_container_width=True):
+        from state import new_chat
+        new_chat()
+        st.rerun()
+
+    for chat_id, chat in st.session_state.chats.items():
+        active = chat_id == st.session_state.current_chat_id
+        label = ("● " if active else "") + (chat["title"] or "Untitled chat")
+        if st.sidebar.button(label, key=f"chat_{chat_id}", use_container_width=True):
+            from state import switch_chat
+            switch_chat(chat_id)
+            st.rerun()
+
+
+def render_profile_icon():
+    st.sidebar.markdown("---")
+    user = st.session_state.user
+    name = user["name"] if user else "Guest"
+    initial = name[0].upper()
+    st.sidebar.markdown(
+        f"""
+        <div style='display:flex;align-items:center;gap:10px;padding:8px 0;'>
+            <div style='width:32px;height:32px;border-radius:50%;background:#6B7280;
+                        color:white;display:flex;align-items:center;justify-content:center;
+                        font-weight:600;flex-shrink:0;'>{initial}</div>
+            <span>{name}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
