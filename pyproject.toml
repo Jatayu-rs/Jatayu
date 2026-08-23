@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.8",
     "python-multipart>=0.0.32",
     "uvicorn[standard]>=0.52.4",
+    "streamlit>=1.62.0",
 ]
 
 [dependency-groups]
