@@ -1,11 +1,11 @@
 from __future__ import annotations 
-
-from fastapi import FastAPI, File , Form , HTTPexception , UploadFile 
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile 
 from fastapi.middleware.cors import CORSMiddleware 
-
 import jatayu.tools
 from jatayu.controller import Orchestrator 
-from jatayu.schemas import  ImageRef , QuerryResponse 
+from jatayu.schemas import ImageRef, QueryResponse
+
+
 
 app = FastAPI(title="Jatayu")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],allow_methods=["*"],allow_headers=["*"])
