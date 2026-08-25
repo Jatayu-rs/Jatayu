@@ -17,3 +17,6 @@ wandb/
 .vscode/
 .idea/
 .DS_Store
+checkpoints/
+data/
+output/
