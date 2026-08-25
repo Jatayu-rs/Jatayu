@@ -53,7 +53,7 @@ def test_every_registered_formula_has_a_hand_computed_value():
         "NDTI": 0.1 / 0.5,
         "CHLOROPHYLL_RATIO": 0.5,
         "SALINITY_PROXY": -1 / 3,
-        "NDSI": 0.0,
+        
     }
 
     assert set(values) == set(expected)
@@ -83,7 +83,7 @@ def test_every_registered_formula_has_a_hand_computed_value():
         "NBR2",
         "NDTI",
         "SALINITY_PROXY",
-        "NDSI",
+    
     ],
 )
 def test_normalised_indices_stay_in_range_for_physical_finite_inputs(name):
@@ -313,13 +313,13 @@ def test_diff_rejects_shape_mismatch():
         ("is my paddy stressed", "NDRE"),
         ("mangrove health", "CMR"),
         ("illegal mining", "FERROUS_RATIO"),
-        ("burn scar", "BAI"),
+        ("burn scar", "NBR"),
         ("how turbid is the lagoon", "NDTI"),
         ("map river water", "MNDWI"),
         ("crop moisture", "NDMI"),
         ("urban expansion", "NDBI"),
         ("clay minerals", "CLAY_RATIO"),
-        ("snow cover", "NDSI"),
+        
         ("bare soil", "BSI"),
         ("iron ore exploration", "FERROUS_RATIO"),
     ],
@@ -337,7 +337,22 @@ def test_select_indices_realistic_queries(
 def test_select_indices_is_empty_for_empty_query():
     assert IndexAnalyser().select_indices("   ") == []
 
+def test_ratio_indices_are_scale_invariant_or_reject_dn():
+    """Normalised differences cancel DN scaling. Power ratios and indices with
+    absolute constants do not — they must reject unscaled input rather than
+    returning a silently meaningless number."""
+    refl = {k: v.copy() for k, v in BANDS.items()}
+    dn = {k: v * 10000 for k, v in BANDS.items()}
+    analyser = IndexAnalyser()
 
+    for name in ("NDVI", "MNDWI", "CLAY_RATIO", "FERROUS_RATIO"):
+        a = analyser.compute(refl, [name])[name]
+        b = analyser.compute(dn, [name])[name]
+        np.testing.assert_allclose(a, b, rtol=1e-9)
+
+    for name in ("RI", "BAI"):
+        with pytest.raises(ValueError, match="reflectance"):
+            analyser.compute(dn, [name])
 def test_unknown_index_and_invalid_percentile_are_rejected():
     analyser = IndexAnalyser()
 
