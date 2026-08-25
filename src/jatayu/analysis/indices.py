@@ -8,10 +8,16 @@ conservative scene-plausibility guards, not universal class thresholds:
 percentiles determine sensitivity, while the floor prevents a mathematically
 valid percentile from inventing a class in a scene where the phenomenon is not
 spectrally plausible.
+
+Router matching (``IndexAnalyser.select_indices``) is whole-token, never
+substring. A substring test lets English function words reach band maths:
+"referred to in the query" scored NDVI through "moni-to-r", "grow-in-g" and
+"whe-the-r", which outranked the actual water indices for a water query.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -30,6 +36,78 @@ CANONICAL_BANDS = frozenset(
 # Above this, band values are assumed to be digital numbers rather than surface
 # reflectance. Sentinel-2 L2A stores reflectance scaled by 10000.
 REFLECTANCE_MAX = 1.5
+
+
+# ---------------------------------------------------------------------------
+# Query tokenisation for the router
+# ---------------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r"[a-z]+")
+
+# Stopwords fall into three groups, all of which caused false matches under the
+# previous substring scorer:
+#   1. English function words - "the", "to", "in" carry no class information.
+#   2. Task verbs - they describe what to DO, not what to look FOR. "monitor
+#      the water" and "map the water" should select the same index.
+#   3. Words shared by nearly every registry entry - matching them ranks the
+#      entry with the most prose, not the most relevant physics.
+_RAW_STOPWORDS = frozenset(
+    {
+        # english function words
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has",
+        "have", "in", "into", "is", "it", "its", "of", "on", "or", "that",
+        "the", "this", "to", "was", "were", "with", "what", "where", "which",
+        "how", "can", "you", "your", "please", "any", "all", "such", "between",
+        "their", "there", "whether",
+        # task verbs and UI scaffolding
+        "highlight", "show", "identify", "find", "detect", "locate", "mark",
+        "give", "tell", "measure", "assess", "monitor", "screen", "check",
+        "compare", "estimate", "map", "support", "separate", "refine",
+        "distinguish", "investigate", "inspect", "delineate",
+        "region", "area", "image", "imagery", "scene", "picture", "query",
+        "referred", "refer", "output", "result",
+        # words shared by nearly every registry entry
+        "index", "normalized", "normalised", "difference", "band", "ratio",
+        "value", "used", "use", "useful", "likely", "more", "less", "other",
+        "extent", "status", "condition",
+    }
+)
+
+
+def _singular(token: str) -> str:
+    """Crude, deterministic plural folding so 'bodies' matches 'body'.
+
+    Deliberately not a real stemmer: no dependency, no surprises, and every
+    transformation here is reversible by eye when debugging a ranking.
+    """
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+        return token[:-1]
+    return token
+
+
+STOPWORDS = frozenset(_singular(word) for word in _RAW_STOPWORDS)
+
+
+def _token_sequence(text: str) -> list[str]:
+    """Normalised token sequence with order preserved, so bigrams stay meaningful."""
+    return [_singular(t) for t in _TOKEN_RE.findall(text.lower()) if len(t) > 2]
+
+
+def _content_tokens(tokens: list[str]) -> set[str]:
+    """Deduplicated content words. A set, so repeating "the" cannot score twice."""
+    return {t for t in tokens if t not in STOPWORDS}
+
+
+def _bigrams(tokens: list[str]) -> set[tuple[str, str]]:
+    """Adjacent token pairs, letting "water body" outrank an incidental "water"."""
+    return set(zip(tokens, tokens[1:]))
+
+
+# ---------------------------------------------------------------------------
+# Index computations
+# ---------------------------------------------------------------------------
 
 
 def _normalised_difference(a: FloatArray, b: FloatArray) -> FloatArray:
@@ -161,8 +239,13 @@ class IndexDefinition:
 # Clay and ferrous ratios are classical geological band-ratio techniques.
 #
 # NDSI is deliberately ABSENT. Its formula, nd(green, swir1), is byte-identical
-# to MNDWI, so it fires on any water body — it would report snow on Chilika
+# to MNDWI, so it fires on any water body - it would report snow on Chilika
 # Lake. Reinstate only behind a latitude/elevation plausibility gate.
+#
+# use_cases are ROUTER INPUT, not documentation. Every phrase here is scored
+# against user queries, so a class noun that never appears in any use_case is
+# unreachable no matter how good the physics is. When adding an index, write
+# the nouns a user would actually type.
 
 INDEX_REGISTRY: dict[str, IndexDefinition] = {
     "MNDWI": IndexDefinition(
@@ -174,11 +257,14 @@ INDEX_REGISTRY: dict[str, IndexDefinition] = {
         (-1.0, 1.0),
         (
             "map open water and flooded areas",
+            "delineate water bodies and their boundaries",
             "find ponds, lakes, rivers, lagoons, and inundation",
             "detect water in built-up areas with reduced urban noise",
             "map water in coastal Odisha and Chilika lagoon",
         ),
-        priority=10,
+        # Default water index: outranks CMR and NDTI on a bare "water" query,
+        # both of which are specialisations (mangrove, turbidity).
+        priority=5,
     ),
     "NDWI": IndexDefinition(
         ("green", "nir"),
@@ -189,6 +275,7 @@ INDEX_REGISTRY: dict[str, IndexDefinition] = {
         (-1.0, 1.0),
         (
             "detect open surface water",
+            "delineate water bodies and their boundaries",
             "map rivers, lakes, ponds, and wetlands",
             "estimate water extent from optical imagery",
         ),
@@ -418,7 +505,7 @@ INDEX_REGISTRY: dict[str, IndexDefinition] = {
         (
             "detect burn scars",
             "estimate wildfire disturbance",
-            "map burned forest",
+            "map burned forest in Similipal and Odisha",
             "compare vegetation condition before and after fire",
         ),
         polarity="negative",
@@ -449,10 +536,12 @@ INDEX_REGISTRY: dict[str, IndexDefinition] = {
         (
             "measure water turbidity",
             "estimate how turbid a lagoon is",
-            "compare turbidity between water bodies",
+            "compare turbidity and clarity between water bodies",
             "monitor sediment-rich water in Chilika lagoon and coastal Odisha",
         ),
-        priority=10,
+        # Turbidity queries always carry an explicit turbid/sediment/clarity
+        # token, so NDTI does not need to win a generic "water body" tie.
+        priority=30,
     ),
     "CHLOROPHYLL_RATIO": IndexDefinition(
         ("rededge1", "nir"),
@@ -498,9 +587,37 @@ def _validate_registry() -> None:
             raise ValueError(f"{name} has an invalid valid_range")
         if not definition.use_cases:
             raise ValueError(f"{name} must expose at least one router use case")
+        if not _index_vocabulary(name, definition)[0]:
+            raise ValueError(
+                f"{name} has no content tokens in its use_cases - it is "
+                "unreachable by the router. Add class nouns a user would type."
+            )
+
+
+def _index_vocabulary(
+    name: str, definition: IndexDefinition
+) -> tuple[set[str], set[tuple[str, str]]]:
+    """Build the router vocabulary for one index: content unigrams plus bigrams."""
+    unigrams: set[str] = set()
+    bigrams: set[tuple[str, str]] = set()
+    for phrase in definition.use_cases:
+        sequence = _token_sequence(phrase)
+        unigrams |= _content_tokens(sequence)
+        bigrams |= _bigrams(sequence)
+    # The index's own name is a legitimate query term ("show me NDVI").
+    unigrams |= {
+        _singular(part) for part in name.lower().split("_") if len(part) > 2
+    }
+    return unigrams, bigrams
 
 
 _validate_registry()
+
+# Precomputed once at import: select_indices stays a pure set-intersection.
+_INDEX_VOCAB: dict[str, tuple[set[str], set[tuple[str, str]]]] = {
+    name: _index_vocabulary(name, definition)
+    for name, definition in INDEX_REGISTRY.items()
+}
 
 
 class IndexAnalyser:
@@ -508,9 +625,16 @@ class IndexAnalyser:
 
     ``compute`` is O(kN) time and O(kN) output space for k requested indices and
     N pixels. ``classify`` is O(N) for the percentile plus O(N) mask space.
-    ``diff`` is O(N). ``select_indices`` scans the whole registry in O(IU) for I
-    entries and U use-case phrases - negligible at 21 entries, and deterministic.
+    ``diff`` is O(N). ``select_indices`` is O(I) set intersections over I
+    registry entries against a precomputed vocabulary - negligible at 21
+    entries, and deterministic.
     """
+
+    # Router scoring. A matched adjacent pair is worth more than the two tokens
+    # separately, so "water body" beats an index that merely mentions "water".
+    _UNIGRAM_WEIGHT = 1.0
+    _BIGRAM_WEIGHT = 3.0
+    _MIN_SCORE = 1.0
 
     def compute(
         self, bands: dict[str, np.ndarray], names: list[str]
@@ -656,35 +780,83 @@ class IndexAnalyser:
 
         return after_arr - before_arr
 
-    def select_indices(self, query: str) -> list[str]:
-        """Rank indices by keyword overlap with router-facing use-case phrases.
+    def explain_selection(self, query: str) -> list[dict]:
+        """Return the full scoring trace for a query, best first.
 
-        Ties break on the declared ``priority`` (lower wins), NOT on registry
-        insertion order - so "burn scar" returns NBR before BAI because NBR is
-        the standard burn index, not because it happens to be declared first.
+        Provenance for the UI and for debugging a ranking: every entry shows
+        which query tokens and which adjacent pairs matched, so an index choice
+        can be argued with rather than taken on trust.
         """
-        tokens = [token for token in query.lower().split() if len(token) > 1]
-        if not tokens:
-            return []
+        sequence = _token_sequence(query)
+        q_unigrams = _content_tokens(sequence)
+        q_bigrams = _bigrams(sequence)
 
-        ranked: list[tuple[int, int, str]] = []
+        trace: list[dict] = []
         for name, definition in INDEX_REGISTRY.items():
-            text = " ".join(definition.use_cases).lower()
-            score = sum(
-                1 for token in tokens if token in text or token in name.lower()
+            unigrams, bigrams = _INDEX_VOCAB[name]
+            matched_unigrams = sorted(q_unigrams & unigrams)
+            matched_bigrams = sorted(" ".join(pair) for pair in q_bigrams & bigrams)
+            score = (
+                self._UNIGRAM_WEIGHT * len(matched_unigrams)
+                + self._BIGRAM_WEIGHT * len(matched_bigrams)
             )
-            if score:
-                # reverse=True sorts score descending; negating priority makes
-                # lower priority values sort first within an equal score.
-                ranked.append((score, -definition.priority, name))
+            if score >= self._MIN_SCORE:
+                trace.append(
+                    {
+                        "index": name,
+                        "score": score,
+                        "priority": definition.priority,
+                        "matched_terms": matched_unigrams,
+                        "matched_phrases": matched_bigrams,
+                    }
+                )
 
-        ranked.sort(reverse=True)
+        trace.sort(key=lambda row: (-row["score"], row["priority"], row["index"]))
+        return trace
+
+    def select_indices(self, query: str) -> list[str]:
+        """Rank indices by whole-token overlap with router-facing use-case phrases.
+
+        Tokens are matched as WORDS, never as substrings. The previous substring
+        test let English function words reach band maths: "the" matched NDVI and
+        NDRE through "whe-the-r", "to" through "moni-to-r", and "in" through
+        almost everything, so "Highlight the water body referred to in the
+        query." returned NDVI ahead of MNDWI. Query tokens are also deduplicated,
+        so a word repeated in a sentence cannot score twice.
+
+        Adjacent-pair matches are weighted above single tokens, so "water body"
+        beats an incidental "water". A query whose every token is a stopword
+        scores nothing and returns [] rather than guessing - callers MUST handle
+        the empty list as "intent not understood", not index into it blindly.
+
+        Ties break on declared ``priority`` (lower wins), then on name, so
+        "burn scar" returns NBR before BAI because NBR is the standard burn
+        index - and the order is stable across runs and Python versions.
+        """
+        sequence = _token_sequence(query)
+        q_unigrams = _content_tokens(sequence)
+        if not q_unigrams:
+            return []
+        q_bigrams = _bigrams(sequence)
+
+        ranked: list[tuple[float, int, str]] = []
+        for name, definition in INDEX_REGISTRY.items():
+            unigrams, bigrams = _INDEX_VOCAB[name]
+            score = (
+                self._UNIGRAM_WEIGHT * len(q_unigrams & unigrams)
+                + self._BIGRAM_WEIGHT * len(q_bigrams & bigrams)
+            )
+            if score >= self._MIN_SCORE:
+                ranked.append((score, definition.priority, name))
+
+        ranked.sort(key=lambda row: (-row[0], row[1], row[2]))
         return [name for _, _, name in ranked]
 
 
 __all__ = [
     "CANONICAL_BANDS",
     "INDEX_REGISTRY",
+    "STOPWORDS",
     "IndexAnalyser",
     "IndexDefinition",
 ]
