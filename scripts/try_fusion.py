@@ -1,23 +1,27 @@
+import sys
 from pathlib import Path
 
-from jatayu.io.loader import read_bands  # noqa: F401 — ensures imports resolve
 from jatayu.schemas import ImageRef, Modality, ToolRequest
 from jatayu.tools import fusion
 
-ROOT = Path(__file__).resolve().parent.parent
-S = ROOT / "data" / "samples"
+import rasterio
 
 
-def ref(name, modality, w, h):
-    return ImageRef(path=str(S / name), modality=modality, width=w, height=h)
+def ref(path: Path, modality: Modality) -> ImageRef:
+    with rasterio.open(path) as src:
+        return ImageRef(
+            path=str(path), modality=modality,
+            crs=str(src.crs), bounds=tuple(src.bounds),
+            width=src.width, height=src.height, band_count=src.count,
+        )
 
+
+opt_path, sar_path = Path(sys.argv[1]), Path(sys.argv[2])
 
 req = ToolRequest(
     query="Use the optical and SAR images together to identify built-up and water regions.",
-    images=[
-        ref("kolkata_optical.tif", Modality.MULTISPECTRAL, 2075, 1902),
-        ref("kolkata_sar.tif", Modality.SAR, 2075, 1902),
-    ],
+    images=[ref(opt_path, Modality.MULTISPECTRAL), ref(sar_path, Modality.SAR)],
+    params={"decimate": 1},   # chips are only ~278px; don't decimate
 )
 
 result = fusion.run(req)

@@ -18,9 +18,11 @@ percentile barely reaches 0.03 while MNDWI's reaches 0.45 — green-NIR contrast
 collapses over turbid water, and the GBM delta is among the most sediment-laden
 water on Earth. SWIR is absorbed by water regardless of sediment load.
 
-Thresholds below were calibrated against the percentile distribution of a real
-Kolkata Sentinel-1/Sentinel-2 pair. They are scene-dependent and exposed as
-parameters.
+Thresholds are derived per scene from its own percentile distribution, not fixed.
+Measured on chip0000, the previously fixed -18 dB water threshold sat below the
+1st percentile and could never fire. The ISRO evaluation set is RISAT rather than
+Sentinel-1 — a different sensor with different calibration — so fixed values
+would fail there outright.
 """
 
 from __future__ import annotations
@@ -33,11 +35,17 @@ import numpy as np
 from jatayu.io.loader import read_bands
 from jatayu.render import mask_to_png
 from jatayu.schemas import (
-    Evidence, ImageRef, Modality, TaskFamily, TaskName, ToolRequest, ToolResult,
+    Evidence,
+    ImageRef,
+    Modality,
+    TaskFamily,
+    TaskName,
+    ToolRequest,
+    ToolResult,
 )
 from jatayu.tools.registry import register
 
-MODEL_ID = "physics-threshold-v1"
+MODEL_ID = "physics-adaptive-v2"
 
 CLS_UNCLASSIFIED = 0
 CLS_WATER = 1
@@ -53,14 +61,19 @@ LEGEND = {
     "4": "smooth bare surface or radar shadow (radar-dark, not water)",
 }
 
-# Calibrated from the 1/5/25/50/75/95/99 percentiles of a real Kolkata pair.
+# Typical Sentinel-1 / Sentinel-2 values. No longer used directly — they document
+# the overridable keys and provide a fallback if percentiles cannot be computed.
 DEFAULTS = {
-    "sar_water_db": -18.0,     # ~5th percentile — the dark tail
-    "sar_builtup_db": -2.0,    # ~90th percentile; -5 would catch a third of the scene
-    "mndwi_threshold": 0.10,   # the valley between the land bulk and the water tail
-    "ndbi_threshold": 0.06,    # ~75th percentile
-    "ndvi_threshold": 0.30,    # ~60th percentile
+    "sar_water_db": -18.0,
+    "sar_builtup_db": -2.0,
+    "mndwi_threshold": 0.10,
+    "ndbi_threshold": 0.06,
+    "ndvi_threshold": 0.30,
 }
+
+# Physical floors. Percentiles set the threshold; physics sets the bound —
+# without this, the wettest 10% of a bone-dry scene would be called water.
+MNDWI_FLOOR = 0.0
 
 
 def normalised_difference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -71,6 +84,24 @@ def normalised_difference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     out = np.zeros_like(denom, dtype=np.float32)
     np.divide(a - b, denom, out=out, where=np.abs(denom) > 1e-6)
     return out
+
+
+def adaptive_thresholds(
+    sar_db: np.ndarray, mndwi: np.ndarray, ndbi: np.ndarray, ndvi: np.ndarray
+) -> dict[str, float]:
+    """Derive thresholds from this scene rather than assuming global values.
+
+    Backscatter distributions shift with incidence angle, polarisation, and
+    surface roughness, so a threshold calibrated on one scene does not transfer
+    to another — even of the same city.
+    """
+    return {
+        "sar_water_db": float(np.nanpercentile(sar_db, 5)),
+        "sar_builtup_db": float(np.nanpercentile(sar_db, 90)),
+        "mndwi_threshold": max(MNDWI_FLOOR, float(np.nanpercentile(mndwi, 90))),
+        "ndbi_threshold": float(np.nanpercentile(ndbi, 75)),
+        "ndvi_threshold": float(np.nanpercentile(ndvi, 60)),
+    }
 
 
 def classify(
@@ -150,8 +181,13 @@ def _split_by_modality(images: list[ImageRef]) -> tuple[ImageRef, ImageRef]:
 def agreement_confidence(agreed: float, disputed: float) -> float:
     """Confidence from two independent sensors agreeing — a measurement, not a guess.
 
-    Disagreement is capped in its effect: a genuinely half-flooded scene is a real
-    finding, not a reason to distrust the result.
+    `agreed` and `disputed` are fractions OF CLASSIFIED PIXELS, not of the whole
+    scene. Most of a scene is ordinary land that meets no threshold; counting
+    those as "not agreeing" is a category error and was what produced an
+    implausible 0.27 on a result that was actually sound.
+
+    Disagreement is capped in its effect: a genuinely half-flooded scene is a
+    real finding, not a reason to distrust the result.
     """
     penalty = min(disputed, 0.5) * 0.6
     return max(0.0, min(1.0, agreed * (1.0 - penalty) + 0.15))
@@ -161,13 +197,12 @@ def agreement_confidence(agreed: float, disputed: float) -> float:
     TaskName.FUSION,
     families={TaskFamily.CROSS_MODAL},
     description="Combines a co-registered optical image and a SAR image to identify "
-                "surface types more reliably than either alone — especially water, "
-                "built-up areas, and flooded vegetation. Requires one optical and "
-                "one SAR image.",
+    "surface types more reliably than either alone — especially water, "
+    "built-up areas, and flooded vegetation. Requires one optical and "
+    "one SAR image.",
 )
 def run(req: ToolRequest) -> ToolResult:
     optical, sar = _split_by_modality(req.images)
-    thresholds = {**DEFAULTS, **{k: v for k, v in req.params.items() if k in DEFAULTS}}
     decimate = int(req.params.get("decimate", 2))
 
     green, red, nir, swir = read_bands(
@@ -176,6 +211,7 @@ def run(req: ToolRequest) -> ToolResult:
     (backscatter,) = read_bands(sar, ["vv"], decimate=decimate)
 
     notes: list[str] = []
+
     # GEE's S1_GRD is already log-scaled. Only convert if the data looks linear.
     finite = backscatter[np.isfinite(backscatter)]
     if finite.size and finite.min() >= 0:
@@ -184,9 +220,13 @@ def run(req: ToolRequest) -> ToolResult:
     else:
         sar_db = backscatter
 
-    mndwi = normalised_difference(green, swir)   # not NDWI — see module docstring
+    mndwi = normalised_difference(green, swir)  # not NDWI — see module docstring
     ndbi = normalised_difference(swir, nir)
     ndvi = normalised_difference(nir, red)
+
+    # Derive from the scene, then let the caller override any individual value.
+    thresholds = adaptive_thresholds(sar_db, mndwi, ndbi, ndvi)
+    thresholds.update({k: v for k, v in req.params.items() if k in DEFAULTS})
 
     classified = classify(
         sar_db=sar_db, mndwi=mndwi, ndbi=ndbi, ndvi=ndvi, thresholds=thresholds
@@ -196,20 +236,44 @@ def run(req: ToolRequest) -> ToolResult:
     out_png = Path("outputs") / f"fusion_{uuid4().hex[:8]}.png"
     mask_to_png(classified, out_png)
 
-    agreed = float(((classified == CLS_WATER) | (classified == CLS_BUILTUP)).mean())
-    disputed = float(
-        ((classified == CLS_FLOODED_VEG) | (classified == CLS_SMOOTH_BARE)).mean()
-    )
+    # Agreement among CLASSIFIED pixels only — see agreement_confidence.
+    classified_mask = classified != CLS_UNCLASSIFIED
+    n_classified = int(classified_mask.sum())
+    coverage = n_classified / classified.size
 
+    if n_classified == 0:
+        agreed = disputed = 0.0
+    else:
+        agreed = (
+            float(((classified == CLS_WATER) | (classified == CLS_BUILTUP)).sum())
+            / n_classified
+        )
+        disputed = (
+            float(
+                ((classified == CLS_FLOODED_VEG) | (classified == CLS_SMOOTH_BARE)).sum()
+            )
+            / n_classified
+        )
+
+    notes.insert(
+        0,
+        f"{coverage:.0%} of pixels met a classification threshold; the remainder "
+        "fell between thresholds and are unclassified.",
+    )
     notes.append(
-        "Thresholds are scene-dependent defaults calibrated on a Kolkata "
-        "Sentinel-1/Sentinel-2 pair; they vary with incidence angle, polarisation, "
-        "and surface roughness."
+        "Thresholds derived from this scene's own percentile distribution rather "
+        "than fixed values, because backscatter varies with sensor, incidence "
+        "angle, and surface roughness."
     )
     notes.append(
         "MNDWI (green-SWIR) is used rather than NDWI (green-NIR), which collapses "
         "over turbid water."
     )
+    if coverage < 0.05:
+        notes.append(
+            "Coverage is very low — thresholds may not suit this scene, or the "
+            "scene may contain little water or built-up land."
+        )
 
     return ToolResult(
         answer=sentence,
