@@ -145,12 +145,13 @@ def _classify_direction(words: set[str]) -> ChangeDirection | None:
     return None
 
 
-def _select_task(family: TaskFamily, answer_type: AnswerType) -> TaskName:
-
+def _select_task(family: TaskFamily, answer_type: AnswerType, target=None) -> TaskName:
     if family is TaskFamily.CROSS_MODAL:
         return TaskName.FUSION
     if family is TaskFamily.BI_TEMPORAL:
         return TaskName.CHANGE_VQA
+    if target and target.value == "crop_health":
+        return TaskName.CROP_STRESS
     if answer_type is AnswerType.LOCATION:
         return TaskName.GROUNDING
     return TaskName.VQA
@@ -209,7 +210,7 @@ def parse_intent(
         candidates = indices_for(target)
 
     return Intent(
-        task=_select_task(family, answer_type),
+        task=_select_task(family, answer_type,target),
         target=target,
         answer_type=answer_type,
         change_direction=direction,

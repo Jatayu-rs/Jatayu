@@ -62,6 +62,7 @@ class TaskName(str, Enum):
     CAPTIONING = "captioning"
     CHANGE_VQA = "change_vqa"
     FUSION = "fusion"
+    CROP_STRESS = "crop_stresss"
 
 
 class Severity(str, Enum):
