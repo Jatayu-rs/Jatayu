@@ -20,3 +20,8 @@ wandb/
 checkpoints/
 data/
 output/
+checkpoints/
+*.pt
+*.safetensors
+*.tif
+data/samples/*.tif
