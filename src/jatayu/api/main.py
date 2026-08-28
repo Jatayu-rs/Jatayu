@@ -5,6 +5,7 @@ the geospatial stack installed — it develops against this over HTTP.
 """
 
 from __future__ import annotations
+from src.jatayu.io.database import JatayuDatabaseManager
 
 import shutil
 import tempfile
@@ -149,3 +150,14 @@ async def query(
         # Uploads are disposable; the rendered overlay in outputs/ is what persists.
         for p in saved:
             p.unlink(missing_ok=True)
+
+
+db = JatayuDatabaseManager()
+
+def handle_workspace_access(email, password):
+    result = db.authenticate_user(email, password)
+    if result["status"] == "success":
+        return "🔓 Access Granted. Routing telemetry feeds..."
+    else:
+        return f"❌ Access Denied: {result['message']}"
+
