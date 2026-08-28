@@ -1,0 +1,19 @@
+/* app/globals.css */
+@import "tailwindcss";
+
+@theme {
+  --color-cream: #F7F3EC;
+  --color-ink: #1C1917;
+  --color-terracotta: #C2410C;
+  --color-terracotta-soft: #F4DECE;
+  --color-sage: #5B6E5A;
+  --color-sage-soft: #E3E9DE;
+
+  --font-serif: var(--font-serif), Georgia, serif;
+  --font-mono: var(--font-mono), monospace;
+}
+
+body {
+  background-color: var(--color-cream);
+  color: var(--color-ink);
+}
