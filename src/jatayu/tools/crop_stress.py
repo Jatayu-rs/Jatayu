@@ -117,15 +117,23 @@ def run(req: ToolRequest) -> ToolResult:
         composite = composite / total_weight
 
     composite = np.clip(composite, 0.0, 1.0)
+    valid_pixels = np.isfinite(composite)
     mean_stress = float(np.nanmean(composite))
 
-    # --- classify into stress levels -----------------------------------------
-    stress_class = np.zeros(shape, dtype=np.uint8)
-    stress_class[composite >= 0.20] = 1  # mild
-    stress_class[composite >= 0.40] = 2  # moderate
-    stress_class[composite >= 0.65] = 3  # severe
+# --- classify into stress levels -----------------------------------------
+# NaN comparisons (e.g. `nan >= 0.20`) are always False, so NaN pixels
+# would otherwise fall through every threshold and land in class 0
+# ("healthy") by default. Use a sentinel (255) for invalid pixels instead,
+# so they're excluded from every fraction rather than silently inflating
+# the healthy count above n_valid.
+    _INVALID = 255
+    stress_class = np.full(shape, _INVALID, dtype=np.uint8)
+    stress_class[valid_pixels & (composite < 0.20)] = 0   # healthy
+    stress_class[valid_pixels & (composite >= 0.20)] = 1  # mild
+    stress_class[valid_pixels & (composite >= 0.40)] = 2  # moderate
+    stress_class[valid_pixels & (composite >= 0.65)] = 3  # severe
 
-    n_valid = int(np.sum(np.isfinite(composite)))
+    n_valid = int(np.sum(valid_pixels))
     if n_valid == 0:
         n_valid = 1  # avoid division by zero
 
@@ -134,7 +142,6 @@ def run(req: ToolRequest) -> ToolResult:
     frac_moderate = float(np.sum(stress_class == 2)) / n_valid
     frac_severe = float(np.sum(stress_class == 3)) / n_valid
     frac_stressed = frac_mild + frac_moderate + frac_severe
-
     notes.append(f"mean_composite_stress={mean_stress:.3f}")
     notes.append(f"fraction_stressed={frac_stressed:.3f}")
 

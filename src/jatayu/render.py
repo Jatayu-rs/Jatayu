@@ -22,27 +22,103 @@ PALETTE: dict[int, tuple[int, int, int]] = {
 }
 
 
+def mask_overlay_png(
+    classified: np.ndarray,
+    base_image: np.ndarray,
+    out_path: str | Path,
+    *,
+    alpha: float = 0.55,
+    palette: dict[int, tuple[int, int, int]] | None = None,
+) -> Path:
+    """Render class mask semi-transparently over a satellite RGB base.
+
+    base_image: (bands, H, W) or (H, W, 3) array — first 3 bands used as RGB.
+    alpha: overlay opacity, 0.0 = invisible, 1.0 = solid.
+    palette: optional class→color override. Defaults to the module PALETTE
+        (water/built-up/vegetation/bare). Pass a tool-specific palette when
+        the class codes mean something else, e.g. crop-stress severity.
+    """
+    if classified.ndim != 2:
+        raise ValueError(f"classified must be 2-D, got {classified.shape}")
+
+    active_palette = palette or PALETTE
+    h, w = classified.shape
+
+    # Prepare base RGB
+    base = np.asarray(base_image, dtype=np.float64)
+    if base.ndim == 3 and base.shape[0] in (3, 4, 5):
+        base = np.moveaxis(base[:3], 0, -1)
+    if base.ndim == 2:
+        base = np.stack([base] * 3, axis=-1)
+
+    if base.shape[:2] != (h, w):
+        from scipy.ndimage import zoom
+        factors = (h / base.shape[0], w / base.shape[1], 1)
+        base = zoom(base, factors, order=1)
+
+    for c in range(3):
+        ch = base[:, :, c]
+        valid = ch[np.isfinite(ch)]
+        if valid.size == 0:
+            continue
+        lo, hi = np.percentile(valid, [2, 98])
+        if hi > lo:
+            ch = np.clip((ch - lo) / (hi - lo) * 255, 0, 255)
+        else:
+            ch = np.zeros_like(ch)
+        base[:, :, c] = ch
+
+    base = np.nan_to_num(base, nan=0.0).astype(np.uint8)
+
+    overlay = np.zeros((h, w, 4), dtype=np.uint8)
+    for code, colour in active_palette.items():
+        if code == 0:
+            continue  # class 0 stays transparent — healthy areas show raw imagery
+        mask = classified == code
+        overlay[mask, :3] = colour
+        overlay[mask, 3] = int(alpha * 255)
+
+    base_f = base.astype(np.float64)
+    overlay_f = overlay[:, :, :3].astype(np.float64)
+    alpha_arr = overlay[:, :, 3:4].astype(np.float64) / 255.0
+
+    composited = base_f * (1 - alpha_arr) + overlay_f * alpha_arr
+    composited = np.clip(composited, 0, 255).astype(np.uint8)
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(composited).save(out)
+    return out
+
+
 def mask_to_png(
     classified: np.ndarray,
     out_path: str | Path,
+    *,
+    palette: dict[int, tuple[int, int, int]] | None = None,
 ) -> Path:
-    """Render integer class codes as a simple categorical PNG."""
+    """Render a class mask as flat palette colors, no base image required.
+
+    Used as a fallback for callers (e.g. fusion) when compositing over a
+    satellite RGB base isn't possible — for instance if the RGB bands
+    couldn't be read or the base array is malformed. Unclassified pixels use
+    the same neutral grey as ``PALETTE[0]`` so this reads consistently next
+    to ``mask_overlay_png`` output rather than introducing a different
+    background convention.
+    """
     if classified.ndim != 2:
-        raise ValueError(
-            f"classified mask must be 2-D, got shape {classified.shape}"
-        )
+        raise ValueError(f"classified must be 2-D, got {classified.shape}")
 
+    active_palette = palette or PALETTE
     h, w = classified.shape
-    rgb = np.zeros((h, w, 3), dtype=np.uint8)
 
-    for code, colour in PALETTE.items():
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    for code, colour in active_palette.items():
         rgb[classified == code] = colour
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-
     Image.fromarray(rgb).save(out)
-
     return out
 
 
