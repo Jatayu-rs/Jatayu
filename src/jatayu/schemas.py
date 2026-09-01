@@ -13,6 +13,19 @@ Rules:
      bottom of the dependency graph.
 
 See docs/tool-contract.md for the prose explanation.
+
+--------------------------------------------------------------------------------
+CHANGELOG (flag in team chat per rule 2 above before merging):
+  - Fixed TaskName.CROP_STRESS value: was "crop_stresss" (typo), now "crop_stress".
+    Any code, fixture, or stored data comparing against the old string value
+    needs updating — this is a breaking string change, not a pure addition.
+  - BoundingBox: added the same x/y-ordering validation to y_max that x_max
+    already had. A box with y_max < y_min previously passed validation silently.
+  - TraceStep.stage: added "interpret" to the Literal, matching the pipeline
+    docstring in orchestrator.py (validate -> classify -> interpret -> route ->
+    execute -> assemble). Intent-parsing trace entries were previously logged
+    under "classify", which didn't match the documented stage list.
+--------------------------------------------------------------------------------
 """
 
 from __future__ import annotations
@@ -62,7 +75,7 @@ class TaskName(str, Enum):
     CAPTIONING = "captioning"
     CHANGE_VQA = "change_vqa"
     FUSION = "fusion"
-    CROP_STRESS = "crop_stresss"
+    CROP_STRESS = "crop_stress"  # FIXED: was "crop_stresss" (typo)
 
 
 class Severity(str, Enum):
@@ -154,6 +167,16 @@ class BoundingBox(BaseModel):
             raise ValueError("x_max must be >= x_min")
         return v
 
+    # FIXED: y_max previously had no matching validator, so a box with
+    # y_max < y_min (e.g. from a y-axis mix-up, which is an easy mistake
+    # given raster row order runs top-to-bottom) passed validation silently.
+    @field_validator("y_max")
+    @classmethod
+    def _y_ordered(cls, v: float, info: Any) -> float:
+        if "y_min" in info.data and v < info.data["y_min"]:
+            raise ValueError("y_max must be >= y_min")
+        return v
+
 
 class Evidence(BaseModel):
     """The visual backing for an answer.
@@ -236,7 +259,10 @@ class TraceStep(BaseModel):
     """
 
     step: int
-    stage: Literal["validate", "classify", "route", "execute", "combine"]
+    # FIXED: added "interpret" so intent-parsing steps get their own stage
+    # instead of being logged under "classify", matching the pipeline
+    # docstring in orchestrator.py.
+    stage: Literal["validate", "classify", "interpret", "route", "execute", "combine"]
     detail: str
     tool_name: TaskName | None = None
     model_id: str | None = None
